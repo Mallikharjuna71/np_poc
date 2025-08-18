@@ -96,3 +96,26 @@ def upsert_table(df, catalog_name, schema_name, table_name, primary_keys):
         df.alias("s"),
        f"{condition}"
     ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+
+# COMMAND ----------
+
+def silver_table(df,table_name, silver_catalog, silver_schema, primary_keys):
+    if not spark.catalog.tableExists(f"`{silver_catalog}`.{silver_schema}.{table_name}"):
+        create_table(df, silver_catalog, silver_schema, table_name)
+        print(table_name,'create')
+    else:
+        upsert_table(df, silver_catalog, silver_schema, table_name, primary_keys)
+        print(table_name,'upsert')
+
+# COMMAND ----------
+
+from pyspark.sql.functions import hash, col
+from pyspark.sql.window import Window
+
+def generate_int_key_from_string(df, col_name):
+    df =  df.withColumn("hash_key", hash(col(col_name)))
+    window = Window.partitionBy("hash_key").orderBy(col(col_name))
+    df = df.withColumn("sk_id", row_number().over(window))
+    return df
+
+    
