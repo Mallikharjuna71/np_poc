@@ -1,6 +1,7 @@
 # Databricks notebook source
 from delta.tables import DeltaTable
 from pyspark.sql.functions import *
+from pyspark.sql.window import Window
 
 # COMMAND ----------
 
@@ -15,9 +16,6 @@ from pyspark.sql.functions import *
         list: A list of file paths (strings) located directly in the given base path.
               Directories are excluded. If an error occurs, an empty list is returned.
 
-    Notes:
-        - This function does NOT search recursively in subdirectories.
-        - Works with Databricks volumes and any DBFS path accessible via dbutils.fs.ls.
 """
 def list_files_in_volume(base_path):
   
@@ -47,10 +45,6 @@ def list_files_in_volume(base_path):
     Returns:
         None: The function writes a Delta table to the specified catalog and schema.
 
-    Notes:
-        - Table name is derived from the file name without extension.
-        - Source file must be accessible from Databricks and match the specified file format.
-        - If mode is "overwrite", the existing table will be replaced.
 """
 def create_table_from_volume(volume_path, catalog_name, schema_name, file_format, mode="overwrite"):
     file_name = volume_path.split("/")[-1] 
@@ -83,11 +77,42 @@ def create_dataframe(catalog, schema, table):
 
 # COMMAND ----------
 
+"""
+    Create or overwrite a Delta table in Databricks from a given DataFrame.
+
+    Args:
+        df (pyspark.sql.DataFrame): The input DataFrame to be written as a table.
+        catalog_name (str): Name of the catalog in which the table will be created.
+        schema_name (str): Name of the schema (database) under the catalog.
+        table_name (str): Name of the target table to create.
+
+    Returns:
+        None
+"""
 def create_table(df, catalog_name, schema_name, table_name):
     df.write.mode("overwrite").saveAsTable(f"`{catalog_name}`.{schema_name}.{table_name}")
 
 # COMMAND ----------
 
+  """
+    Perform an upsert (merge) operation into a Delta table in Databricks.
+
+    Args:
+        df (pyspark.sql.DataFrame): 
+            Source DataFrame containing new or updated records.
+        catalog_name (str): 
+            Name of the catalog where the target table resides.
+        schema_name (str): 
+            Name of the schema (database) where the target table resides.
+        table_name (str): 
+            Name of the Delta table to be upserted into.
+        primary_keys (dict): 
+            A dictionary mapping table names to their primary key column names.
+            Example: {"dim_articles": "article_id", "dim_users": "user_id"}
+
+    Returns:
+        None
+"""
 def upsert_table(df, catalog_name, schema_name, table_name, primary_keys):
     table = DeltaTable.forName(spark, f"`{catalog_name}`.{schema_name}.{table_name}")
     condition =f"t.{primary_keys.get(table_name)} = s.{primary_keys.get(table_name)}" 
@@ -99,23 +124,46 @@ def upsert_table(df, catalog_name, schema_name, table_name, primary_keys):
 
 # COMMAND ----------
 
+ """
+    Create or update a Silver layer Delta table in Databricks.
+
+    Args:
+        df (pyspark.sql.DataFrame): Input DataFrame to be written to the Silver layer.
+        table_name (str): Name of the Silver table to create or update.
+        silver_catalog (str): Target catalog for the Silver table.
+        silver_schema (str): Target schema (database) for the Silver table.
+        primary_keys (list[str]): List of primary key column names used for upsert operations.
+
+    Returns:
+        None
+"""
 def silver_table(df,table_name, silver_catalog, silver_schema, primary_keys):
-    if not spark.catalog.tableExists(f"`{silver_catalog}`.{silver_schema}.{table_name}"):
-        create_table(df, silver_catalog, silver_schema, table_name)
-        print(table_name,'create')
+    if table_name == 'dim_articles':
+        if not spark.catalog.tableExists(f"`{silver_catalog}`.{silver_schema}.{table_name}"):
+            create_table(df, silver_catalog, silver_schema, table_name)
+        else:
+            upsert_table(df, silver_catalog, silver_schema, table_name, primary_keys)
     else:
-        upsert_table(df, silver_catalog, silver_schema, table_name, primary_keys)
-        print(table_name,'upsert')
+        create_table(df, silver_catalog, silver_schema, table_name)
+
 
 # COMMAND ----------
 
-from pyspark.sql.functions import hash, col
-from pyspark.sql.window import Window
+ """
+    Generate a surrogate integer key column from a string column in a given DataFrame.
 
-def generate_int_key_from_string(df, col_name):
-    df =  df.withColumn("hash_key", hash(col(col_name)))
-    window = Window.partitionBy("hash_key").orderBy(col(col_name))
-    df = df.withColumn("sk_id", row_number().over(window))
+    Args:
+        df (pyspark.sql.DataFrame): Input DataFrame containing the source column.
+        table_name (str): Logical table name prefix (used to construct the surrogate key column name).
+        col_name (str): Name of the string column from which the surrogate key will be generated.
+
+    Returns:
+        pyspark.sql.DataFrame: DataFrame with an additional surrogate key column named
+                               '{table_name}_sk_id', generated using row_number().
+"""
+def generate_int_key_from_string(df, table_name, col_name):
+    window = Window.partitionBy(f"{table_name}_{col_name}").orderBy(col(f"{table_name}_{col_name}"))
+    df = df.withColumn(f"{table_name}_sk_id", row_number().over(window))
     return df
 
     

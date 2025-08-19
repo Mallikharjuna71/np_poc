@@ -16,32 +16,11 @@ silver_schema = dbutils.widgets.get('silver_schema')
 
 silver_table_names = ['dim_ads','dim_articles', 'dim_authors', 'dim_users']
 gold_table_names = ['fact_article_engagement', 'fact_ad_performance']
-primary_keys = {'dim_ads':'ad_id','dim_articles':'hash_id','dim_authors':'author_id','dim_users':'user_id','fact_article_engagement':'hash_key', 'fact_ad_performance':'hash_key'}
+primary_keys = {'dim_ads':'dim_ads_sk_id','dim_articles':'dim_articles_sk_id','dim_authors':'dim_authors_sk_id','dim_users':'dim_users_sk_id','fact_article_engagement':'fact_article_engagement_hash_key', 'fact_ad_performance':'fact_ad_performance_hash_key'}
 
 # COMMAND ----------
 
 # MAGIC %run /Workspace/Users/meka.mallikharjunareddy@diggibyte.com/np_poc/common_utils
-
-# COMMAND ----------
-
-# """
-#     Creates a gold dimension table with integer surrogate keys.
-
-#     Args:
-#         silver_df (DataFrame): Silver dimension table.
-#         pk_col (str): Name of the primary key column in silver.
-#         surrogate_col (str): Name of surrogate key column to be added.
-
-#     Returns:
-#         DataFrame: Gold dimension with surrogate keys.
-# """
-# def create_gold_dimension(table_name, primary_keys, surrogate_col="surrogate_id"):
-
-#     # Generate deterministic integer IDs based on PK
-#     w = Window.orderBy(primary_keys.get(table_name))
-#     full_table_name = f"{silver_catalog}.{silver_schema}.{table_name}"
-#     silver_df = spark.table(full_table_name)
-#     silver_df.withColumn(surrogate_col, row_number().over(w)) 
 
 # COMMAND ----------
 
@@ -71,7 +50,7 @@ def generate_clicked_ad(df):
     return df.withColumn("clicked_ad", when(rand() > 0.7, 1).otherwise(0))
 
 def Hash_key(df):
-    return df.withColumn("hash_key", sha2(concat(df["article_id"], df["user_id"], df['ad_id']), 256))
+    return df.withColumn("fact_article_engagement_hash_key", sha2(concat(df["article_id"], df["user_id"], df['ad_id']), 256))
 
 
 def random_assign_ads(articles_df, ads_df):
@@ -94,9 +73,9 @@ def transform_user_engagement(users_df, articles_df, authors_df, ads_df):
     # Join authors
     engagement_df = engagement_df.join(
         authors_df,
-        on=engagement_df.author_id == authors_df.author_id,
+        on=engagement_df['author_id'] == authors_df['author_id'],
         how="left"
-    )
+)
 
     # Join ads (~50% chance) — simulate by flag join
     ads_flagged = ads_df.withColumn("ads_flag", when(rand() > 0.5, 1).otherwise(0))
@@ -111,16 +90,14 @@ def transform_user_engagement(users_df, articles_df, authors_df, ads_df):
         .transform(generate_scroll_depth)
         .transform(generate_clicked_ad)
         .transform(Hash_key)
-        .withColumnRenamed("category", "category")
-        .withColumnRenamed("location", "location")
         .withColumnRenamed("language", "article_language")
         .withColumnRenamed("name", "author_name")
     )
 
     # Select columns in final order
     engagement_df = engagement_df.select(
-        col("user_id"),
-        col("article_id"),
+        col("dim_users_sk_id"),
+        col("dim_articles_sk_id"),
         col("event_timestamp"),
         col("read_time_seconds"),
         col("scroll_depth"),
@@ -129,10 +106,10 @@ def transform_user_engagement(users_df, articles_df, authors_df, ads_df):
         col("location"),
         col("article_language"),
         col("author_name"),
-        col("ad_id"),
+        col("dim_ads_sk_id"),
         col("ad_type"),
         col("advertiser"),
-        col('hash_key')
+        col('fact_article_engagement_hash_key')
     )
 
     return engagement_df
@@ -161,7 +138,7 @@ def generate_revenue(df):
     return df.withColumn('revenue', spark_round(rand() * 400, 2))
 
 def hash_key(df):
-    return df.withColumn("hash_key", sha2(concat(col("article_id"), col("ad_id")), 256))
+    return df.withColumn("fact_ad_performance_hash_key", sha2(concat(col("article_id"), col("ad_id")), 256))
 
 
 # COMMAND ----------
@@ -216,28 +193,29 @@ def add_kpis(df):
 
 fact_ad_performance_df = (
     dim_ads.crossJoin(dim_articles)
-           .join(dim_authors, dim_articles.author_id == dim_authors.author_id, "inner")
+           .join(dim_authors, dim_articles['dim_articles_sk_id'] == dim_authors['dim_authors_sk_id'], "inner")
            .transform(add_base_metrics)
            .transform(add_kpis)
            .withColumnRenamed("name", "author_name")
-
+           .withColumn('advertiser', lit('*****'))
+           .withColumn('author_name', lit('******'))
 )
 
 
 # COMMAND ----------
 
 columns = [
-    "ad_id",
+    "dim_ads_sk_id",
     "ad_type",
     "advertiser",
     "format",
-    "article_id",
+    "dim_articles_sk_id",
     "title",
     "category",
     "dim_articles.author_id", 
     "publish_date",
     "language",
-    "hash_key",
+    "fact_ad_performance_hash_key",
     "author_name",
     "department",
     "language_specialization",
@@ -261,15 +239,25 @@ fact_ad_performance_df = fact_ad_performance_df.select(*columns)
 for i in gold_table_names:
     if i == 'fact_ad_performance':
             df = fact_ad_performance_df
-            query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (ad_id, article_id)"""
+            query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (dim_ads_sk_id, dim_articles_sk_id)"""
     elif i == 'fact_article_engagement':
             df = fact_article_engagement_df
-            query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (user_id, article_id)"""
+            query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (dim_users_sk_id, dim_articles_sk_id)"""
     if not spark.catalog.tableExists(f"`{gold_catalog}`.{gold_schema}.{i}"):
-        df.write.mode("overwrite").partitionBy('advertiser', 'author_name').saveAsTable(f"`{gold_catalog}`.{gold_schema}.{i}")
+        df.write.mode("overwrite").partitionBy('advertiser', 'author_name').saveAsTable(f"`{gold_catalog}`.{gold_schema}.{i}") 
         spark.sql(query)
         print('create')
     else:
         upsert_table(df, gold_catalog, gold_schema, i, primary_keys)
         print('update')
 
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * FROM `aws-dms`.gold.fact_article_engagement
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * FROM `aws-dms`.gold.fact_ad_performance
