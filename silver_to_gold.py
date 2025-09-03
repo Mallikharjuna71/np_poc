@@ -1,8 +1,17 @@
 # Databricks notebook source
+# DBTITLE 1,imports
 from pyspark.sql import Window
+from pyspark.sql.functions import rand, floor, round as spark_round, when, current_timestamp, col
+from pyspark.sql.functions import rand, sha2, concat, col, current_date, round as spark_round
+from pyspark.sql.functions import when
+from pyspark.sql.functions import current_timestamp
+from pyspark.sql.functions import lit
+
+
 
 # COMMAND ----------
 
+# DBTITLE 1,widgets
 dbutils.widgets.text('gold_catalog', 'aws-dms')
 dbutils.widgets.text('gold_schema', 'gold')
 dbutils.widgets.text('silver_catalog', 'aws-dms')
@@ -14,9 +23,11 @@ silver_schema = dbutils.widgets.get('silver_schema')
 
 # COMMAND ----------
 
+# DBTITLE 1,variables
 silver_table_names = ['dim_ads','dim_articles', 'dim_authors', 'dim_users']
 gold_table_names = ['fact_article_engagement', 'fact_ad_performance']
 primary_keys = {'dim_ads':'dim_ads_sk_id','dim_articles':'dim_articles_sk_id','dim_authors':'dim_authors_sk_id','dim_users':'dim_users_sk_id','fact_article_engagement':'fact_article_engagement_hash_key', 'fact_ad_performance':'fact_ad_performance_hash_key'}
+dbfs_path = '/Volumes/aws-dms/default/gold'
 
 # COMMAND ----------
 
@@ -24,6 +35,7 @@ primary_keys = {'dim_ads':'dim_ads_sk_id','dim_articles':'dim_articles_sk_id','d
 
 # COMMAND ----------
 
+# DBTITLE 1,silver tables
 dim_ads = create_dataframe('aws-dms', 'silver', 'dim_ads')
 dim_articles = create_dataframe('aws-dms', 'silver', 'dim_articles')
 dim_authors = create_dataframe('aws-dms', 'silver', 'dim_authors')
@@ -31,118 +43,93 @@ dim_users = create_dataframe('aws-dms', 'silver', 'dim_users')
 
 # COMMAND ----------
 
-from pyspark.sql.functions import rand, floor, round as spark_round, when, current_timestamp, col
+# DBTITLE 1,selected columns
+columns = [
+    "dim_users_sk_id",
+    "dim_articles_sk_id",
+    "event_timestamp",
+    "read_time_seconds",
+    "scroll_depth",
+    "clicked_ad",
+    "category",
+    "location",
+    "article_language",
+    "author_name",
+    "dim_ads_sk_id",
+    "ad_type",
+    "advertiser",
+    "fact_article_engagement_hash_key"
+]
 
-# ------------------------------
-# Transformation Helpers
-# ------------------------------
 
-def generate_read_time(df):
-    """Random read time in seconds (0–300)."""
-    return df.withColumn("read_time_seconds", floor(rand() * 300))
+# COMMAND ----------
 
-def generate_scroll_depth(df):
-    """Random scroll depth % (0–100)."""
-    return df.withColumn("scroll_depth", spark_round(rand() * 100, 2))
-
-def generate_clicked_ad(df):
-    """Click flag: 1 if random > 0.7 else 0."""
-    return df.withColumn("clicked_ad", when(rand() > 0.7, 1).otherwise(0))
-
+# DBTITLE 1,Hash_key
 def Hash_key(df):
     return df.withColumn("fact_article_engagement_hash_key", sha2(concat(df["article_id"], df["user_id"], df['ad_id']), 256))
 
+# COMMAND ----------
 
-def random_assign_ads(articles_df, ads_df):
-    """
-    Assign ads randomly (~50% chance) by generating a temp join key.
-    Only rows where random > 0.5 will be joined.
-    """
-    ads_flag = ads_df.withColumn("ads_flag", when(rand() > 0.5, 1).otherwise(0))
-    articles_flagged = articles_df.withColumn("ads_flag", when(rand() > 0.5, 1).otherwise(0))
-    return articles_flagged.join(ads_flag, on="ads_flag", how="left").drop("ads_flag")
-
-# ------------------------------
-# Main Transformation Function
-# ------------------------------
-
-def transform_user_engagement(users_df, articles_df, authors_df, ads_df):
+# DBTITLE 1,joins
+def perform_joins(users_df, articles_df, authors_df, ads_df):
+    """Perform all joins: users+articles, authors, ads."""
     # Cross join users & articles
     engagement_df = users_df.crossJoin(articles_df)
 
     # Join authors
     engagement_df = engagement_df.join(
         authors_df,
-        on=engagement_df['author_id'] == authors_df['author_id'],
+        on=engagement_df["author_id"] == authors_df["author_id"],
         how="left"
-)
+    )
 
-    # Join ads (~50% chance) — simulate by flag join
-    ads_flagged = ads_df.withColumn("ads_flag", when(rand() > 0.5, 1).otherwise(0))
-    engagement_flagged = engagement_df.withColumn("ads_flag", when(rand() > 0.5, 1).otherwise(0))
+    # Join ads (~50% chance)
+    ads_flagged = ads_df.transform(add_random_flag)
+    engagement_flagged = engagement_df.transform(add_random_flag)
     engagement_df = engagement_flagged.join(ads_flagged, on="ads_flag", how="left").drop("ads_flag")
-
-    # Add metrics & rename columns to match SQL output
-    engagement_df = (
-        engagement_df
-        .withColumn("event_timestamp", current_timestamp())
-        .transform(generate_read_time)
-        .transform(generate_scroll_depth)
-        .transform(generate_clicked_ad)
-        .transform(Hash_key)
-        .withColumnRenamed("language", "article_language")
-        .withColumnRenamed("name", "author_name")
-    )
-
-    # Select columns in final order
-    engagement_df = engagement_df.select(
-        col("dim_users_sk_id"),
-        col("dim_articles_sk_id"),
-        col("event_timestamp"),
-        col("read_time_seconds"),
-        col("scroll_depth"),
-        col("clicked_ad"),
-        col("category"),
-        col("location"),
-        col("article_language"),
-        col("author_name"),
-        col("dim_ads_sk_id"),
-        col("ad_type"),
-        col("advertiser"),
-        col('fact_article_engagement_hash_key')
-    )
 
     return engagement_df
 
-# ------------------------------
-# Example Usage
-# ------------------------------
+# COMMAND ----------
 
-fact_article_engagement_df = transform_user_engagement(dim_users, dim_articles, dim_authors, dim_ads)
+# DBTITLE 1,transformations
+def apply_transformations(df, columns):
+    """Apply all transformations: metrics, renames, selects."""
+    return (
+        df.withColumn("event_timestamp", current_timestamp())
+          .transform(generate_read_time)
+          .transform(generate_scroll_depth)
+          .transform(generate_clicked_ad)
+          .transform(Hash_key)
+          .withColumnRenamed("language", "article_language")
+          .withColumnRenamed("name", "author_name")
+          .select(*columns)
+    )
 
 # COMMAND ----------
 
-from pyspark.sql.functions import rand, sha2, concat, col, current_date, round as spark_round
+# DBTITLE 1,master function
+def transform_user_engagement(users_df, articles_df, authors_df, ads_df, columns):
+    joined_df = perform_joins(users_df, articles_df, authors_df, ads_df)
+    transformed_df = apply_transformations(joined_df, columns)
+    return transformed_df
 
-# Generate synthetic metrics using Spark's rand()
-def generate_impressions(df):
-    return df.withColumn('impression', spark_round(rand() * 1000, 0))
+# COMMAND ----------
 
-def generate_clicks(df):
-    return df.withColumn('clicks', spark_round(rand() * 500, 0))
+# DBTITLE 1,fact_article_engagement_df
+fact_article_engagement_df = transform_user_engagement(
+    dim_users, dim_articles, dim_authors, dim_ads, columns
+)
 
-def generate_cost(df):
-    return df.withColumn('cost', spark_round(rand() * 200, 2))
+# COMMAND ----------
 
-def generate_revenue(df):
-    return df.withColumn('revenue', spark_round(rand() * 400, 2))
-
+# DBTITLE 1,hash_key
 def hash_key(df):
     return df.withColumn("fact_ad_performance_hash_key", sha2(concat(col("article_id"), col("ad_id")), 256))
 
-
 # COMMAND ----------
 
+# DBTITLE 1,add_base_metrics
 def add_base_metrics(df):
     """Add impressions, clicks, cost, revenue."""
     return (
@@ -157,29 +144,7 @@ def add_base_metrics(df):
 
 # COMMAND ----------
 
-from pyspark.sql.functions import when
-
-def calc_ctr(df):
-    return df.withColumn(
-        'calc_ctr',
-        when(col('impression') > 0, spark_round(col('clicks') / col('impression'), 4)).otherwise(0.0)
-    )
-
-def calc_cpc(df):
-    return df.withColumn(
-        'calc_cpc',
-        when(col('clicks') > 0, spark_round(col('cost') / col('clicks'), 2)).otherwise(0.0)
-    )
-
-def calc_rpm(df):
-    return df.withColumn(
-        'calc_rpm',
-        when(col('impression') > 0, spark_round((col('revenue') / col('impression')) * 1000, 2)).otherwise(0.0)
-    )
-
-
-# COMMAND ----------
-
+# DBTITLE 1,add_kpis
 def add_kpis(df):
     """Add CTR, CPC, RPM metrics."""
     return (
@@ -188,22 +153,50 @@ def add_kpis(df):
           .transform(calc_rpm)
     )
 
+# COMMAND ----------
+
+# DBTITLE 1,perform_ad_joins
+
+def perform_ad_joins(dim_ads, dim_articles, dim_authors):
+    """Perform all joins for fact_ad_performance."""
+    return (
+        dim_ads.crossJoin(dim_articles)
+               .join(
+                   dim_authors,
+                   dim_articles["dim_articles_sk_id"] == dim_authors["dim_authors_sk_id"],
+                   "inner"
+               )
+    )
 
 # COMMAND ----------
 
-fact_ad_performance_df = (
-    dim_ads.crossJoin(dim_articles)
-           .join(dim_authors, dim_articles['dim_articles_sk_id'] == dim_authors['dim_authors_sk_id'], "inner")
-           .transform(add_base_metrics)
-           .transform(add_kpis)
-           .withColumnRenamed("name", "author_name")
-           .withColumn('advertiser', lit('*****'))
-           .withColumn('author_name', lit('******'))
-)
-
+# DBTITLE 1,apply_ad_transformations
+def apply_ad_transformations(df):
+    """Apply all transformations: metrics, KPIs, renames, literals."""
+    return (
+        df.transform(add_base_metrics)
+          .transform(add_kpis)
+          .withColumnRenamed("name", "author_name")
+          .withColumn("advertiser", lit("*****"))
+          .withColumn("author_name", lit("******"))
+    )
 
 # COMMAND ----------
 
+# DBTITLE 1,transform_ad_performance
+def transform_ad_performance(dim_ads, dim_articles, dim_authors):
+    joined_df = perform_ad_joins(dim_ads, dim_articles, dim_authors)
+    transformed_df = apply_ad_transformations(joined_df)
+    return transformed_df
+
+# COMMAND ----------
+
+# DBTITLE 1,fact_ad_performance_df
+fact_ad_performance_df = transform_ad_performance(dim_ads, dim_articles, dim_authors)
+
+# COMMAND ----------
+
+# DBTITLE 1,selected columns
 columns = [
     "dim_ads_sk_id",
     "ad_type",
@@ -232,32 +225,21 @@ columns = [
 
 # COMMAND ----------
 
+# DBTITLE 1,fact_ad_performance_df
 fact_ad_performance_df = fact_ad_performance_df.select(*columns)
 
 # COMMAND ----------
 
 for i in gold_table_names:
     if i == 'fact_ad_performance':
-            df = fact_ad_performance_df
-            query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (dim_ads_sk_id, dim_articles_sk_id)"""
+        df = fact_ad_performance_df
+        query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (dim_ads_sk_id, dim_articles_sk_id)"""
     elif i == 'fact_article_engagement':
-            df = fact_article_engagement_df
-            query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (dim_users_sk_id, dim_articles_sk_id)"""
+        df = fact_article_engagement_df
+        query = f""" OPTIMIZE `{gold_catalog}`.{gold_schema}.{i} ZORDER BY (dim_users_sk_id, dim_articles_sk_id)"""
     if not spark.catalog.tableExists(f"`{gold_catalog}`.{gold_schema}.{i}"):
-        df.write.mode("overwrite").partitionBy('advertiser', 'author_name').saveAsTable(f"`{gold_catalog}`.{gold_schema}.{i}") 
-        spark.sql(query)
-        print('create')
+        df.write.mode("overwrite").format("delta").partitionBy("advertiser", "author_name").save(f"{dbfs_path}/{i}")
+        # spark.sql(query)
     else:
         upsert_table(df, gold_catalog, gold_schema, i, primary_keys)
-        print('update')
 
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select * FROM `aws-dms`.gold.fact_article_engagement
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC select * FROM `aws-dms`.gold.fact_ad_performance

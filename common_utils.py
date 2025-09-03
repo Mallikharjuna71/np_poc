@@ -5,7 +5,8 @@ from pyspark.sql.window import Window
 
 # COMMAND ----------
 
-"""
+def list_files_in_volume(base_path):
+    """
     List all files in a given Databricks volume path (non-recursive).
 
     Args:
@@ -16,9 +17,7 @@ from pyspark.sql.window import Window
         list: A list of file paths (strings) located directly in the given base path.
               Directories are excluded. If an error occurs, an empty list is returned.
 
-"""
-def list_files_in_volume(base_path):
-  
+    """
     file_list = []
     try:
         files = dbutils.fs.ls(base_path)
@@ -31,7 +30,8 @@ def list_files_in_volume(base_path):
 
 # COMMAND ----------
 
-"""
+def create_table_from_volume(volume_path, catalog_name, schema_name, file_format, mode="overwrite"):
+    """
     Create a Delta table in Databricks from a file located in a volume path.
 
     Args:
@@ -45,8 +45,7 @@ def list_files_in_volume(base_path):
     Returns:
         None: The function writes a Delta table to the specified catalog and schema.
 
-"""
-def create_table_from_volume(volume_path, catalog_name, schema_name, file_format, mode="overwrite"):
+    """
     file_name = volume_path.split("/")[-1] 
     table_base_name = file_name.rsplit(".", 1)[0]
     table_name = f"{catalog_name}.{schema_name}.{table_base_name}"
@@ -60,7 +59,8 @@ def create_table_from_volume(volume_path, catalog_name, schema_name, file_format
 
 # COMMAND ----------
 
-"""
+def create_dataframe(catalog, schema, table):
+    """
     Loads a Delta table from the specified Unity Catalog location into a Spark DataFrame.
 
     Args:
@@ -70,14 +70,14 @@ def create_table_from_volume(volume_path, catalog_name, schema_name, file_format
 
     Returns:
         pyspark.sql.DataFrame: A Spark DataFrame containing the table's data.
-"""
-def create_dataframe(catalog, schema, table):
+    """
     df = spark.table(f'`{catalog}`.{schema}.{table}')
     return df
 
 # COMMAND ----------
 
-"""
+def create_table(df, catalog_name, schema_name, table_name):
+    """
     Create or overwrite a Delta table in Databricks from a given DataFrame.
 
     Args:
@@ -88,13 +88,13 @@ def create_dataframe(catalog, schema, table):
 
     Returns:
         None
-"""
-def create_table(df, catalog_name, schema_name, table_name):
+    """
     df.write.mode("overwrite").saveAsTable(f"`{catalog_name}`.{schema_name}.{table_name}")
 
 # COMMAND ----------
 
-  """
+def upsert_table(df, catalog_name, schema_name, table_name, primary_keys):
+    """
     Perform an upsert (merge) operation into a Delta table in Databricks.
 
     Args:
@@ -112,8 +112,7 @@ def create_table(df, catalog_name, schema_name, table_name):
 
     Returns:
         None
-"""
-def upsert_table(df, catalog_name, schema_name, table_name, primary_keys):
+    """
     table = DeltaTable.forName(spark, f"`{catalog_name}`.{schema_name}.{table_name}")
     condition =f"t.{primary_keys.get(table_name)} = s.{primary_keys.get(table_name)}" 
     print(condition)
@@ -124,7 +123,8 @@ def upsert_table(df, catalog_name, schema_name, table_name, primary_keys):
 
 # COMMAND ----------
 
- """
+def silver_table(df,table_name, silver_catalog, silver_schema, primary_keys):
+    """
     Create or update a Silver layer Delta table in Databricks.
 
     Args:
@@ -136,9 +136,8 @@ def upsert_table(df, catalog_name, schema_name, table_name, primary_keys):
 
     Returns:
         None
-"""
-def silver_table(df,table_name, silver_catalog, silver_schema, primary_keys):
-    if table_name == 'dim_articles':
+    """
+    if table_name == 'dim_articles_updated':
         if not spark.catalog.tableExists(f"`{silver_catalog}`.{silver_schema}.{table_name}"):
             create_table(df, silver_catalog, silver_schema, table_name)
         else:
@@ -149,7 +148,8 @@ def silver_table(df,table_name, silver_catalog, silver_schema, primary_keys):
 
 # COMMAND ----------
 
- """
+def generate_int_key_from_string(df, table_name, col_name):
+    """
     Generate a surrogate integer key column from a string column in a given DataFrame.
 
     Args:
@@ -160,10 +160,94 @@ def silver_table(df,table_name, silver_catalog, silver_schema, primary_keys):
     Returns:
         pyspark.sql.DataFrame: DataFrame with an additional surrogate key column named
                                '{table_name}_sk_id', generated using row_number().
-"""
-def generate_int_key_from_string(df, table_name, col_name):
+    """
     window = Window.partitionBy(f"{table_name}_{col_name}").orderBy(col(f"{table_name}_{col_name}"))
-    df = df.withColumn(f"{table_name}_sk_id", row_number().over(window))
+    df = df.withColumn(f"{table_name}_sk_id", row_number().over(window)).filter(col(f"{table_name}_sk_id") == 1)
     return df
-
     
+
+# COMMAND ----------
+
+def generate_read_time(df):
+    """Random read time in seconds (0–300)."""
+    return df.withColumn("read_time_seconds", floor(rand() * 300))
+
+# COMMAND ----------
+
+def generate_scroll_depth(df):
+    """Random scroll depth % (0–100)."""
+    return df.withColumn("scroll_depth", spark_round(rand() * 100, 2))
+
+# COMMAND ----------
+
+def generate_clicked_ad(df):
+    """Click flag: 1 if random > 0.7 else 0."""
+    return df.withColumn("clicked_ad", when(rand() > 0.7, 1).otherwise(0))
+
+# COMMAND ----------
+
+from pyspark.sql.functions import rand, when
+
+def add_random_flag(df):
+    """
+    Add a random flag column to a DataFrame.
+
+    Args:
+        df (DataFrame): Input Spark DataFrame
+        col_name (str): Name of the new flag column (default = "flag")
+        threshold (float): Threshold for assigning true_val (default = 0.5)
+        true_val (any): Value to assign when rand() > threshold (default = 1)
+        false_val (any): Value to assign otherwise (default = 0)
+
+    Returns:
+        DataFrame: DataFrame with new random flag column
+    """
+    return df.withColumn(
+        'ads_flag',
+        when(rand() > 0.5, 1).otherwise(0)
+    )
+
+
+# COMMAND ----------
+
+def generate_impressions(df):
+    return df.withColumn('impression', spark_round(rand() * 1000, 0))
+
+# COMMAND ----------
+
+def generate_clicks(df):
+    return df.withColumn('clicks', spark_round(rand() * 500, 0))
+
+# COMMAND ----------
+
+def generate_cost(df):
+    return df.withColumn('cost', spark_round(rand() * 200, 2))
+
+# COMMAND ----------
+
+def generate_revenue(df):
+    return df.withColumn('revenue', spark_round(rand() * 400, 2))
+
+# COMMAND ----------
+
+def calc_ctr(df):
+    return df.withColumn(
+        'calc_ctr',
+        when(col('impression') > 0, spark_round(col('clicks') / col('impression'), 4)).otherwise(0.0)
+    )
+
+# COMMAND ----------
+
+def calc_cpc(df):
+    return df.withColumn(
+        'calc_cpc',
+        when(col('clicks') > 0, spark_round(col('cost') / col('clicks'), 2)).otherwise(0.0)
+    )
+
+# COMMAND ----------
+
+def calc_rpm(df):
+    return df.withColumn(
+        'calc_rpm',
+        when(col('impression') > 0, spark_round((col('revenue') / col('impression')) * 1000, 2)).otherwise(0.0)
+    )

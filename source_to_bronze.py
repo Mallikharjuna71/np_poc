@@ -7,8 +7,7 @@ base_path = '/Volumes/aws-dms/default/data'
 
 # COMMAND ----------
 
-table_paths = list_files_in_volume('/Volumes/aws-dms/default/data')
-print(*table_paths, sep='\n')
+table_paths = list_files_in_volume(base_path)
 
 # COMMAND ----------
 

@@ -12,7 +12,7 @@ silver_schema = dbutils.widgets.get('silver_schema')
 
 # COMMAND ----------
 
-generated_keys = {'dim_ads':'sk_id','dim_articles':'sk_id','dim_authors':'sk_id','dim_users':'sk_id','fact_article_engagement':'hash_key', 'fact_ad_performance':'hash_key'}
+generated_keys = {'dim_ads':'dim_ads_sk_id','dim_articles':'dim_articles_sk_id','dim_authors':'dim_authors_sk_id','dim_users':'dim_users_sk_id','fact_article_engagement':'hash_key', 'fact_ad_performance':'hash_key'}
 primary_keys = {'dim_ads':'ad_id','dim_articles':'article_id','dim_authors':'author_id','dim_users':'user_id','fact_article_engagement':'hash_key', 'fact_ad_performance':'hash_key'}
 
 # COMMAND ----------
@@ -21,11 +21,16 @@ primary_keys = {'dim_ads':'ad_id','dim_articles':'article_id','dim_authors':'aut
 
 # COMMAND ----------
 
-
+df = create_dataframe(bronze_catalog, bronze_schema, table_name)
 
 # COMMAND ----------
 
-df = create_dataframe(bronze_catalog, bronze_schema, table_name)
-df = df.distinct().dropDuplicates(subset=[primary_keys[table_name]]).dropna(how='all', subset=[primary_keys[table_name]]).withColumn(f'{table_name}_hash_key', sha2(concat_ws(df['article_id'], df['author_id']), 256))
+df = df.withColumn(f'{table_name}_hash_key', sha2(concat_ws(df['article_id'], df['author_id']), 256))
+
+# COMMAND ----------
+
 df = generate_int_key_from_string(df, table_name,'hash_key')
+
+# COMMAND ----------
+
 silver_table(df, table_name, silver_catalog, silver_schema, generated_keys)

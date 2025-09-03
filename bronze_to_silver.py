@@ -1,6 +1,5 @@
 # Databricks notebook source
 # MAGIC %run /Workspace/Users/meka.mallikharjunareddy@diggibyte.com/np_poc/dim_tables/dim_ads 
-# MAGIC
 
 # COMMAND ----------
 
